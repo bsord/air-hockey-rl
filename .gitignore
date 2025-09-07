@@ -1,0 +1,138 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+*.egg-info/
+pip-wheel-metadata/
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+.nox/
+.pytest_cache/
+*.cover
+*.coverage
+htmlcov/
+
+# Translations
+*.mo
+*.pot
+
+# Sphinx documentation
+docs/_build/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer/virtualenv
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# PyCharm
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Notebook checkpoints
+.ipynb_checkpoints
+
+# dotenv
+.env
+.env.*
+
+# Python environment version managers
+.python-version
+
+# mypy
+.mypy_cache/
+.pytype/
+
+# ruff/flake caches
+.ruff_cache/
+
+# pypackages
+__pypackages__/
+
+# Logs
+logs/
+log/
+*.log
+
+# TensorBoard / ML logs
+runs/
+tb_logs/
+
+# Model checkpoints and saved weights (common ML formats)
+models/
+saved_models/
+checkpoints/
+weights/
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.pb
+*.tflite
+*.onnx
+*.ckpt.index
+
+# Stable Baselines / RL artifacts
+*.zip
+*.pkl
+
+# Numpy caches or arrays
+*.npy
+
+# MLflow
+mlruns/
+
+# Temporary files
+*.tmp
+*.swp
+~*
+
+# Backup files
+*.bak
+*.old
+
+# Ignore pipenv / poetry files (if you use them, remove as needed)
+Pipfile.lock
+poetry.lock
+
+# Local project-specific files
+*.code-workspace
+
+# Keep this file in the repo; edit as needed
