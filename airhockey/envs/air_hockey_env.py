@@ -13,6 +13,8 @@ class AirHockeyEnv(gym.Env):
         self.blue_random = blue_random
         self.viewer = None
         self.clock = None
+        # When user closes the pygame window we set this and avoid recreating it.
+        self._window_closed = False
         self.score = [0, 0]  # [player1, player2]
         self.game_count = 0
         self.last_winner = None
@@ -191,19 +193,36 @@ class AirHockeyEnv(gym.Env):
         return self.state, reward, self.done, False, info
 
     def render(self, fps_display=60):
+        # If the window was closed by the user, don't recreate it.
+        if getattr(self, "_window_closed", False):
+            return
         if self.render_mode != "human":
             return
         import pygame
         if self.viewer is None or not pygame.display.get_init() or not pygame.display.get_surface():
-            pygame.init()
-            self.viewer = pygame.display.set_mode((self.WIDTH, self.HEIGHT))
-            pygame.display.set_caption("Air Hockey RL")
-            self.clock = pygame.time.Clock()
+            # If the display is not initialized, try to initialize unless the window
+            # was closed previously.
+            try:
+                pygame.init()
+                self.viewer = pygame.display.set_mode((self.WIDTH, self.HEIGHT))
+                pygame.display.set_caption("Air Hockey RL")
+                self.clock = pygame.time.Clock()
+            except pygame.error:
+                # If initialization fails (for example headless), avoid raising and
+                # simply return without rendering.
+                return
 
         # Process pygame events to keep window responsive
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
+                # Mark that the user closed the window so we don't recreate it later.
+                self._window_closed = True
+                # Also turn off render_mode to prevent future render attempts
+                self.render_mode = None
+                try:
+                    pygame.quit()
+                except Exception:
+                    pass
                 self.viewer = None
                 return
 
@@ -248,4 +267,3 @@ class AirHockeyEnv(gym.Env):
                 self._result_display_count = 0
         pygame.display.flip()
         self.clock.tick(60)
-

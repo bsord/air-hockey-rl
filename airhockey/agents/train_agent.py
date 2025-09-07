@@ -1,5 +1,3 @@
-# This file has been deleted.
-
 import gymnasium as gym
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
@@ -8,7 +6,7 @@ import time
 import os
 import argparse
 # Register custom env
-import ml_project.envs
+import airhockey.envs as envs
 
 
 class RenderCallback(BaseCallback):
@@ -18,17 +16,31 @@ class RenderCallback(BaseCallback):
 
     def handle_speed_event(self, env):
         import pygame
-        for event in pygame.event.get():
+        try:
+            events = pygame.event.get()
+        except pygame.error:
+            return
+        for event in events:
             if event.type == pygame.QUIT:
-                pygame.quit()
+                try:
+                    pygame.quit()
+                except Exception:
+                    pass
+                try:
+                    base = getattr(env, "unwrapped", env)
+                    setattr(base, "_window_closed", True)
+                    setattr(base, "render_mode", None)
+                except Exception:
+                    pass
 
     def _on_step(self) -> bool:
         env = self.training_env.envs[0]
         base_env = env.unwrapped
-        # Render every render_freq steps
         if self.n_calls % self.render_freq == 0:
             base_env.render()
             self.handle_speed_event(env)
+            if getattr(base_env, "_window_closed", False):
+                return False
         return True
 
 
