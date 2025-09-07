@@ -2,24 +2,56 @@ import gymnasium as gym
 import numpy as np
 import time
 
+
 class AirHockeyEnv(gym.Env):
     _profile_total = 0.0
     _profile_count = 0
     metadata = {"render_modes": ["human"], "render_fps": 60}
     """Custom 2D Air Hockey environment."""
-    def __init__(self, render_mode=None, blue_random=False):
+
+    def __init__(self, render_mode=None, blue_random=False, own_goal_penalty=0.0, own_goal_time_window=10,
+                 inactivity_steps=None, inactivity_penalty=0.0, max_episode_steps=None, debug=False,
+                 randomize_sides=True):
         super().__init__()
         self.render_mode = render_mode
         self.blue_random = blue_random
+
+        # Penalty to apply when a paddle last touched the puck and that same paddle
+        # later causes a goal for the opponent (an own-goal). Default 0 (disabled).
+        self.own_goal_penalty = float(own_goal_penalty)
+        # Time-window (in environment steps) within which a last touch counts as
+        # responsibility for an own-goal. If 0 or None, fall back to the previous
+        # immediate-touch heuristic (no time window).
+        self.own_goal_time_window = int(own_goal_time_window) if own_goal_time_window is not None else 0
+
+        # Rendering and window state
         self.viewer = None
         self.clock = None
-        # When user closes the pygame window we set this and avoid recreating it.
         self._window_closed = False
+
+        # Match/state bookkeeping
         self.score = [0, 0]  # [player1, player2]
         self.game_count = 0
         self.last_winner = None
         self.last_final_score = None
-        self.waiting_for_serve = False  # True when puck is waiting to be served
+        self.waiting_for_serve = False
+
+        # Track which paddle last touched the puck: 0 = red (player1), 1 = blue (player2), None = none
+        self.last_toucher = None
+        self.last_toucher_step = None
+
+        # Step counter for time-windowing last touches
+        self._step_count = 0
+        # Track steps since last touch for inactivity detection
+        self._steps_since_touch = 0
+
+        # Optional debug logging
+        self.debug = bool(debug)
+
+        # Optionally randomize which paddle the policy controls each episode.
+        self.randomize_sides = bool(randomize_sides)
+        self._swapped = False
+
         # Game constants
         self.BOARD_WIDTH, self.HEIGHT = 600, 400
         self.STATS_WIDTH = 200
@@ -32,6 +64,17 @@ class AirHockeyEnv(gym.Env):
         self.GOAL_HEIGHT = 10
         self.FPS = 60
 
+        # Inactivity timeout: number of steps without paddle touch that triggers episode end
+        if inactivity_steps is None:
+            # Default to 20 seconds of inactivity if not provided
+            self.inactivity_steps = int(20 * self.FPS)
+        else:
+            self.inactivity_steps = int(inactivity_steps)
+        # Penalty to apply on inactivity timeout
+        self.inactivity_penalty = float(inactivity_penalty)
+        # Hard max steps per episode
+        self.max_episode_steps = int(max_episode_steps) if max_episode_steps is not None else None
+
         # Observation: [paddle1_x, paddle1_y, paddle2_x, paddle2_y, puck_x, puck_y, puck_vx, puck_vy]
         high = np.array([
             self.BOARD_WIDTH, self.HEIGHT, self.BOARD_WIDTH, self.HEIGHT,
@@ -40,9 +83,7 @@ class AirHockeyEnv(gym.Env):
         self.observation_space = gym.spaces.Box(-high, high, dtype=np.float32)
 
         # Actions: [dx1, dy1, dx2, dy2] (movement for both paddles)
-        self.action_space = gym.spaces.Box(
-            low=-1, high=1, shape=(4,), dtype=np.float32
-        )
+        self.action_space = gym.spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
 
         # State variables
         self.state = None
@@ -51,8 +92,9 @@ class AirHockeyEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         # Center paddles and puck for new match
-        paddle1_x, paddle1_y = self.WIDTH // 2, self.HEIGHT - self.PADDLE_RADIUS - 10
-        paddle2_x, paddle2_y = self.WIDTH // 2, self.PADDLE_RADIUS + 10
+        # Place paddles centered in the board area (BOARD_WIDTH), not including the stats area
+        paddle1_x, paddle1_y = self.BOARD_WIDTH // 2, self.HEIGHT - self.PADDLE_RADIUS - 10
+        paddle2_x, paddle2_y = self.BOARD_WIDTH // 2, self.PADDLE_RADIUS + 10
         puck_x, puck_y = self.BOARD_WIDTH // 2, self.HEIGHT // 2  # Center of board
         puck_vx, puck_vy = 0.0, 0.0  # Puck does not move until touched
         self.waiting_for_serve = True
@@ -65,13 +107,44 @@ class AirHockeyEnv(gym.Env):
         if options and options.get("reset_score", False):
             self.score = [0, 0]
             self.game_count = 0
-        return self.state, {}
+        # Reset last toucher on new episode/match
+        self.last_toucher = None
+        self._step_count = 0
+        self._steps_since_touch = 0
+        # Randomize sides per episode if enabled
+        if self.randomize_sides:
+            # swap with 50% probability; prefer gym's RNG if available
+            try:
+                r = self.np_random.integers(0, 2)
+            except Exception:
+                r = np.random.randint(0, 2)
+            self._swapped = bool(r)
+        else:
+            self._swapped = False
+        if self.debug:
+            print(f"[DEBUG] reset: paddle1=({paddle1_x},{paddle1_y}) paddle2=({paddle2_x},{paddle2_y}) puck=({puck_x},{puck_y}) swapped={self._swapped}")
+        # Return swapped observation if needed (swap paddle fields)
+        obs = self.state.copy()
+        if self._swapped:
+            obs[[0,1,2,3]] = obs[[2,3,0,1]]
+        return obs, {}
 
     def step(self, action):
         start_time = time.perf_counter()
+        # Increment global step counter
+        self._step_count += 1
+        # If observation/action were swapped for this episode, unswap the incoming action
+        # so the environment receives actions in its native ordering (red, then blue).
+        if self._swapped:
+            # Expect action layout [dx_self,dy_self,dx_opp,dy_opp] where 'self' maps to paddle2 in env
+            a = action.copy()
+            # swap back to env order
+            a[[0,1,2,3]] = a[[2,3,0,1]]
+            dx1, dy1, dx2, dy2 = a
+        else:
+            dx1, dy1, dx2, dy2 = action
         # Unpack state
         paddle1_x, paddle1_y, paddle2_x, paddle2_y, puck_x, puck_y, puck_vx, puck_vy = self.state
-        dx1, dy1, dx2, dy2 = action
 
         # If blue_random is True, override blue agent's action with random
         if self.blue_random:
@@ -100,10 +173,19 @@ class AirHockeyEnv(gym.Env):
 
         # Paddle collision (simple distance check)
         paddle_touched = False
-        for px, py in [(paddle1_x, paddle1_y), (paddle2_x, paddle2_y)]:
+        # Iterate with index so we can record which paddle touched the puck
+        for idx, (px, py) in enumerate([(paddle1_x, paddle1_y), (paddle2_x, paddle2_y)]):
             dist = np.hypot(puck_x - px, puck_y - py)
             if dist < self.PADDLE_RADIUS + self.PUCK_RADIUS:
                 paddle_touched = True
+                # Record last toucher: 0 = red (player1), 1 = blue (player2)
+                self.last_toucher = idx
+                # Record the step when this touch happened for time-windowing
+                self.last_toucher_step = self._step_count
+                # Reset inactivity counter when puck is touched
+                self._steps_since_touch = 0
+                if self.debug:
+                    print(f"[DEBUG] step {self._step_count}: paddle {idx} touched puck at ({puck_x:.1f},{puck_y:.1f})")
                 if self.waiting_for_serve:
                     # Serve: give puck a random velocity
                     angle = np.random.uniform(0, 2 * np.pi)
@@ -116,7 +198,7 @@ class AirHockeyEnv(gym.Env):
                     puck_vx = self.PUCK_SPEED * np.cos(angle)
                     puck_vy = self.PUCK_SPEED * np.sin(angle)
 
-        # Goal check (score only if puck enters the top or bottom goal area)
+    # Goal check (score only if puck enters the top or bottom goal area)
         reward = 0.0
         goal_left = self.BOARD_WIDTH // 2 - self.GOAL_WIDTH // 2
         goal_right = self.BOARD_WIDTH // 2 + self.GOAL_WIDTH // 2
@@ -152,6 +234,32 @@ class AirHockeyEnv(gym.Env):
                 puck_x, puck_y = self.BOARD_WIDTH // 2, self.HEIGHT // 2
             puck_vx, puck_vy = 0.0, 0.0  # Puck does not move until touched
             self.waiting_for_serve = True
+            # Detect own-goal using a time-limited last-touch window
+            own_goal = False
+            if self.last_toucher is not None and self.own_goal_penalty != 0.0:
+                # If a time window is configured, require last touch to be recent
+                if self.own_goal_time_window and getattr(self, 'last_toucher_step', None) is not None:
+                    age = self._step_count - self.last_toucher_step
+                    recent = age <= self.own_goal_time_window
+                else:
+                    # If no window configured (0), treat any last_toucher as recent
+                    recent = True
+
+                if recent:
+                    # If reward positive (red scored) but last_toucher was blue -> blue own-goal
+                    if reward > 0 and self.last_toucher == 1:
+                        own_goal = True
+                    # If reward negative (blue scored) but last_toucher was red -> red own-goal
+                    if reward < 0 and self.last_toucher == 0:
+                        own_goal = True
+                    if own_goal:
+                        # Penalize by subtracting penalty from the scalar reward
+                        reward -= float(self.own_goal_penalty)
+            # Clear last_toucher after goal regardless
+            self.last_toucher = None
+            self.last_toucher_step = None
+            # Reset inactivity counter after goal/serve
+            self._steps_since_touch = 0
             # Pause for 1 second in visible mode
             if self.render_mode == "human":
                 self.state = np.array([
@@ -178,12 +286,32 @@ class AirHockeyEnv(gym.Env):
         else:
             self.done = False
 
+        # If paddle wasn't touched this step, increment inactivity counter
+        if not paddle_touched:
+            self._steps_since_touch += 1
+
+        # Check inactivity timeout
+        if self.inactivity_steps is not None and self._steps_since_touch >= self.inactivity_steps:
+            # Apply penalty and end episode
+            reward -= float(self.inactivity_penalty)
+            self.done = True
+            info = {"match_over": False, "timeout": "inactivity"}
+            return self.state, reward, self.done, False, info
+
+        # Check hard max steps per episode
+        if self.max_episode_steps is not None and self._step_count >= self.max_episode_steps:
+            self.done = True
+            info = {"match_over": False, "timeout": "max_steps"}
+            return self.state, reward, self.done, False, info
+
         self.state = np.array([
             paddle1_x, paddle1_y, paddle2_x, paddle2_y,
             puck_x, puck_y, puck_vx, puck_vy
         ], dtype=np.float32)
         # Return match_over in info for tracking
         info = {"match_over": match_over}
+        if goal_scored:
+            info["own_goal"] = own_goal
         # Profiling
         AirHockeyEnv._profile_total += time.perf_counter() - start_time
         AirHockeyEnv._profile_count += 1
@@ -237,19 +365,76 @@ class AirHockeyEnv(gym.Env):
         pygame.draw.rect(self.viewer, (200, 0, 0), (self.BOARD_WIDTH//2 - self.GOAL_WIDTH//2, self.HEIGHT - self.GOAL_HEIGHT, self.GOAL_WIDTH, self.GOAL_HEIGHT))
         # Draw paddles
         paddle1_x, paddle1_y, paddle2_x, paddle2_y, puck_x, puck_y, _, _ = self.state
-        pygame.draw.circle(self.viewer, (255, 0, 0), (int(paddle1_x), int(paddle1_y)), self.PADDLE_RADIUS)
-        pygame.draw.circle(self.viewer, (0, 0, 255), (int(paddle2_x), int(paddle2_y)), self.PADDLE_RADIUS)
+        # Determine which physical paddle the agent controls this episode.
+        # If _swapped is True the agent is mapped to paddle index 1 (the top paddle),
+        # otherwise to index 0 (the bottom paddle). We always visually show the
+        # training agent as Red and the opponent as Blue so the visible UI is unambiguous.
+        agent_phys_idx = 1 if getattr(self, '_swapped', False) else 0
+        agent_color_rgb = (255, 0, 0)
+        opp_color_rgb = (0, 0, 255)
+        if agent_phys_idx == 0:
+            pygame.draw.circle(self.viewer, agent_color_rgb, (int(paddle1_x), int(paddle1_y)), self.PADDLE_RADIUS)
+            pygame.draw.circle(self.viewer, opp_color_rgb, (int(paddle2_x), int(paddle2_y)), self.PADDLE_RADIUS)
+        else:
+            # Agent is physically paddle2 (top) this episode; draw it red.
+            pygame.draw.circle(self.viewer, opp_color_rgb, (int(paddle1_x), int(paddle1_y)), self.PADDLE_RADIUS)
+            pygame.draw.circle(self.viewer, agent_color_rgb, (int(paddle2_x), int(paddle2_y)), self.PADDLE_RADIUS)
         # Draw puck
         pygame.draw.circle(self.viewer, (255, 255, 255), (int(puck_x), int(puck_y)), self.PUCK_RADIUS)
-        # Draw stats in the right area
+        # Draw stats in the right area (simplified)
         font = pygame.font.SysFont(None, 32)
-        score_text = font.render(f"Red: {self.score[0]}", True, (255,0,0))
-        blue_text = font.render(f"Blue: {self.score[1]}", True, (0,0,255))
-        game_text = font.render(f"Games: {self.game_count}", True, (255,255,0))
         stats_x = self.BOARD_WIDTH + 20
-        self.viewer.blit(score_text, (stats_x, 40))
+        # If sides are swapped this episode, the training agent is physically player2
+        # so swap the displayed scores so Red (Agent) always shows the agent's score.
+        if getattr(self, '_swapped', False):
+            displayed_red_score = self.score[1]
+            displayed_blue_score = self.score[0]
+        else:
+            displayed_red_score = self.score[0]
+            displayed_blue_score = self.score[1]
+
+        # Red is always the training agent in the UI
+        red_text = font.render(f"Red (Agent): {displayed_red_score}", True, (255, 0, 0))
+        # Blue shows opponent mode in parentheses
+        blue_mode = "random" if self.blue_random else "self-play"
+        blue_text = font.render(f"Blue ({blue_mode}): {displayed_blue_score}", True, (0, 0, 255))
+        self.viewer.blit(red_text, (stats_x, 40))
         self.viewer.blit(blue_text, (stats_x, 80))
-        self.viewer.blit(game_text, (stats_x, 120))
+    # (Numeric reward values removed — UI shows which reward components are active.)
+    # Show active reward configuration (wrapper, shaping, inactivity settings)
+        try:
+            cfg = getattr(self, '_reward_config', None)
+            cfg_font = pygame.font.SysFont(None, 22)
+            if cfg is not None:
+                wrapper = cfg.get('wrapper') or 'none'
+                shaping = 'on' if cfg.get('touch_shaping') else 'off'
+                inact_steps = cfg.get('inactivity_steps')
+                inact_pen = cfg.get('inactivity_penalty')
+                blue_rand = 'on' if cfg.get('blue_random') else 'off'
+                sides = 'random' if cfg.get('randomize_sides') else 'fixed'
+                self.viewer.blit(cfg_font.render(f"Wrapper: {wrapper}", True, (200,200,200)), (stats_x, 120))
+                self.viewer.blit(cfg_font.render(f"Touch shaping: {shaping}", True, (200,200,200)), (stats_x, 144))
+                self.viewer.blit(cfg_font.render(f"Inactivity: steps={inact_steps}", True, (200,200,200)), (stats_x, 168))
+                self.viewer.blit(cfg_font.render(f"Inactivity penalty: {inact_pen}", True, (200,200,200)), (stats_x, 192))
+                self.viewer.blit(cfg_font.render(f"Blue random: {blue_rand}", True, (200,200,200)), (stats_x, 216))
+                self.viewer.blit(cfg_font.render(f"Sides: {sides}", True, (200,200,200)), (stats_x, 240))
+        except Exception:
+            pass
+        # Show which reward mechanisms are effective (clear, non-numeric list)
+        try:
+            eff = getattr(self, '_reward_effective', None)
+            if eff:
+                header = cfg_font.render("Rewards:", True, (255,255,255))
+                self.viewer.blit(header, (stats_x, 272))
+                y = 300
+                bullet_font = pygame.font.SysFont(None, 20)
+                for item in eff:
+                    line = bullet_font.render(f"- {item}", True, (200,200,200))
+                    self.viewer.blit(line, (stats_x, y))
+                    y += 22
+        except Exception:
+            pass
+    # Note: match-level Games counter intentionally not shown in the UI
         # Show match result if available
         if self.last_winner is not None and self.last_final_score is not None:
             winner_text = font.render(f"Winner: {self.last_winner}", True, (255,255,255))

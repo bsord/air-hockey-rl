@@ -136,3 +136,4 @@ poetry.lock
 *.code-workspace
 
 # Keep this file in the repo; edit as needed
+*.csv
