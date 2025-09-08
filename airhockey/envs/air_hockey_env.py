@@ -11,7 +11,7 @@ class AirHockeyEnv(gym.Env):
 
     def __init__(self, render_mode=None, blue_random=False, own_goal_penalty=0.0, own_goal_time_window=10,
                  inactivity_steps=None, inactivity_penalty=0.0, max_episode_steps=None, debug=False,
-                 randomize_sides=True):
+                 center_serve=False, disable_goals=False, randomize_sides=True):
         super().__init__()
         self.render_mode = render_mode
         self.blue_random = blue_random
@@ -51,6 +51,15 @@ class AirHockeyEnv(gym.Env):
         # Optionally randomize which paddle the policy controls each episode.
         self.randomize_sides = bool(randomize_sides)
         self._swapped = False
+        # If true, always place the puck at board center after a goal instead of in front
+        # of the serving paddle. This breaks the serve-placement feedback loop and is
+        # useful for diagnostics and training stability.
+        self.center_serve = bool(center_serve)
+        # If true, disable goal scoring and the usual goal/reset behavior so the
+        # environment runs continuously (useful for long uninterrupted diagnostics).
+        # Note: when disabling goals, no score updates or resets occur; episodes
+        # will only end via `max_episode_steps` or inactivity timeout if configured.
+        self.disable_goals = bool(disable_goals)
 
         # Game constants
         self.BOARD_WIDTH, self.HEIGHT = 600, 400
@@ -146,15 +155,39 @@ class AirHockeyEnv(gym.Env):
         # Unpack state
         paddle1_x, paddle1_y, paddle2_x, paddle2_y, puck_x, puck_y, puck_vx, puck_vy = self.state
 
-        # If blue_random is True, override blue agent's action with random
+        # If blue_random is True, override the opponent's physical paddle action with random.
+        # When sides are randomized the learned agent may be mapped to a different physical paddle
+        # (self._swapped). Only override the physical opponent, not the learned agent.
+        agent_phys_idx = 1 if getattr(self, '_swapped', False) else 0
+        if self.debug:
+            print(f"[DEBUG] step {self._step_count}: swapped={self._swapped} agent_phys_idx={agent_phys_idx} blue_random={self.blue_random}")
         if self.blue_random:
-            dx2, dy2 = self.action_space.sample()[2:]
+            rnd = self.action_space.sample()
+            if agent_phys_idx == 0:
+                # Agent is paddle1 (bottom); opponent is paddle2 (top) -> override dx2,dy2
+                if self.debug:
+                    print(f"[DEBUG] overriding opponent (paddle2) action with random {rnd[2:]}")
+                dx2, dy2 = rnd[2], rnd[3]
+            else:
+                # Agent is paddle2 (top); opponent is paddle1 (bottom) -> override dx1,dy1
+                if self.debug:
+                    print(f"[DEBUG] overriding opponent (paddle1) action with random {rnd[0:2]}")
+                dx1, dy1 = rnd[0], rnd[1]
 
         # Move paddles
         paddle1_x = np.clip(paddle1_x + dx1 * self.PADDLE_SPEED, self.PADDLE_RADIUS, self.BOARD_WIDTH - self.PADDLE_RADIUS)
         paddle1_y = np.clip(paddle1_y + dy1 * self.PADDLE_SPEED, self.HEIGHT // 2, self.HEIGHT - self.PADDLE_RADIUS)
         paddle2_x = np.clip(paddle2_x + dx2 * self.PADDLE_SPEED, self.PADDLE_RADIUS, self.BOARD_WIDTH - self.PADDLE_RADIUS)
         paddle2_y = np.clip(paddle2_y + dy2 * self.PADDLE_SPEED, self.PADDLE_RADIUS, self.HEIGHT // 2)
+
+        # Periodic debug-state print to diagnose drift/bias when debugging is enabled
+        try:
+            if self.debug and (self._step_count % 200 == 0):
+                d1 = float(np.hypot(puck_x - paddle1_x, puck_y - paddle1_y))
+                d2 = float(np.hypot(puck_x - paddle2_x, puck_y - paddle2_y))
+                print(f"[DEBUG_STATE] step={self._step_count} p1x={paddle1_x:.1f} p2x={paddle2_x:.1f} puckx={puck_x:.1f} dx1={dx1:.3f} dx2={dx2:.3f} d1={d1:.2f} d2={d2:.2f}")
+        except Exception:
+            pass
 
         # Move puck only if not waiting for serve
         if not self.waiting_for_serve:
@@ -199,75 +232,98 @@ class AirHockeyEnv(gym.Env):
                     puck_vy = self.PUCK_SPEED * np.sin(angle)
 
     # Goal check (score only if puck enters the top or bottom goal area)
-        reward = 0.0
-        goal_left = self.BOARD_WIDTH // 2 - self.GOAL_WIDTH // 2
-        goal_right = self.BOARD_WIDTH // 2 + self.GOAL_WIDTH // 2
-        match_over = False
-        match_win_bonus = 10.0
-        # Top goal (Red scores)
-        goal_scored = False
-        if puck_y <= self.PUCK_RADIUS and goal_left <= puck_x <= goal_right:
-            reward = 1.0
-            self.score[0] += 1
-            goal_scored = True
-        # Bottom goal (Blue scores)
-        elif puck_y >= self.HEIGHT - self.PUCK_RADIUS and goal_left <= puck_x <= goal_right:
-            reward = -1.0
-            self.score[1] += 1
-            goal_scored = True
+        if not getattr(self, 'disable_goals', False):
+            reward = 0.0
+            goal_left = self.BOARD_WIDTH // 2 - self.GOAL_WIDTH // 2
+            goal_right = self.BOARD_WIDTH // 2 + self.GOAL_WIDTH // 2
+            match_over = False
+            match_win_bonus = 10.0
+            # Top goal (Red scores)
+            goal_scored = False
+            if puck_y <= self.PUCK_RADIUS and goal_left <= puck_x <= goal_right:
+                reward = 1.0
+                self.score[0] += 1
+                goal_scored = True
+            # Bottom goal (Blue scores)
+            elif puck_y >= self.HEIGHT - self.PUCK_RADIUS and goal_left <= puck_x <= goal_right:
+                reward = -1.0
+                self.score[1] += 1
+                goal_scored = True
 
-        # Reset paddles and puck after every goal
-        if goal_scored:
-            paddle1_x, paddle1_y = self.BOARD_WIDTH // 2, self.HEIGHT - self.PADDLE_RADIUS - 10
-            paddle2_x, paddle2_y = self.BOARD_WIDTH // 2, self.PADDLE_RADIUS + 10
-            # Official air hockey: after a goal, the player who was scored upon serves from in front of their paddle
-            serve_distance = self.PADDLE_RADIUS + self.PUCK_RADIUS + 20  # Increased distance for puck placement
-            if reward == 1.0:
-                # Blue lost, puck in front of blue's paddle
-                puck_x = paddle2_x
-                puck_y = paddle2_y + serve_distance
-            elif reward == -1.0:
-                # Red lost, puck in front of red's paddle
-                puck_x = paddle1_x
-                puck_y = paddle1_y - serve_distance
-            else:
-                puck_x, puck_y = self.BOARD_WIDTH // 2, self.HEIGHT // 2
-            puck_vx, puck_vy = 0.0, 0.0  # Puck does not move until touched
-            self.waiting_for_serve = True
-            # Detect own-goal using a time-limited last-touch window
-            own_goal = False
-            if self.last_toucher is not None and self.own_goal_penalty != 0.0:
-                # If a time window is configured, require last touch to be recent
-                if self.own_goal_time_window and getattr(self, 'last_toucher_step', None) is not None:
-                    age = self._step_count - self.last_toucher_step
-                    recent = age <= self.own_goal_time_window
+            # Reset paddles and puck after every goal
+            if goal_scored:
+                # Log goal details for debugging resets/serve placement
+                if self.debug:
+                    print(f"[DEBUG_GOAL] step={self._step_count} goal_reward={reward} score={self.score} last_toucher={self.last_toucher} last_toucher_step={self.last_toucher_step} swapped={self._swapped}")
+                paddle1_x, paddle1_y = self.BOARD_WIDTH // 2, self.HEIGHT - self.PADDLE_RADIUS - 10
+                paddle2_x, paddle2_y = self.BOARD_WIDTH // 2, self.PADDLE_RADIUS + 10
+                # After a goal, either place puck at center (diagnostic/stable option) or
+                # place it in front of the player who was scored upon (traditional rule).
+                serve_distance = self.PADDLE_RADIUS + self.PUCK_RADIUS + 20  # Increased distance for puck placement
+                if self.center_serve:
+                    puck_x, puck_y = self.BOARD_WIDTH // 2, self.HEIGHT // 2
+                    if self.debug:
+                        print(f"[DEBUG_GOAL] center_serve active, placing puck at center ({puck_x:.1f},{puck_y:.1f})")
                 else:
-                    # If no window configured (0), treat any last_toucher as recent
-                    recent = True
+                    if reward == 1.0:
+                        # Blue lost, puck in front of blue's paddle
+                        puck_x = paddle2_x
+                        puck_y = paddle2_y + serve_distance
+                        if self.debug:
+                            print(f"[DEBUG_GOAL] placing puck for blue-serve at ({puck_x:.1f},{puck_y:.1f})")
+                    elif reward == -1.0:
+                        # Red lost, puck in front of red's paddle
+                        puck_x = paddle1_x
+                        puck_y = paddle1_y - serve_distance
+                        if self.debug:
+                            print(f"[DEBUG_GOAL] placing puck for red-serve at ({puck_x:.1f},{puck_y:.1f})")
+                    else:
+                        puck_x, puck_y = self.BOARD_WIDTH // 2, self.HEIGHT // 2
+                puck_vx, puck_vy = 0.0, 0.0  # Puck does not move until touched
+                self.waiting_for_serve = True
+                # Detect own-goal using a time-limited last-touch window
+                own_goal = False
+                if self.last_toucher is not None and self.own_goal_penalty != 0.0:
+                    # If a time window is configured, require last touch to be recent
+                    if self.own_goal_time_window and getattr(self, 'last_toucher_step', None) is not None:
+                        age = self._step_count - self.last_toucher_step
+                        recent = age <= self.own_goal_time_window
+                    else:
+                        # If no window configured (0), treat any last_toucher as recent
+                        recent = True
 
-                if recent:
-                    # If reward positive (red scored) but last_toucher was blue -> blue own-goal
-                    if reward > 0 and self.last_toucher == 1:
-                        own_goal = True
-                    # If reward negative (blue scored) but last_toucher was red -> red own-goal
-                    if reward < 0 and self.last_toucher == 0:
-                        own_goal = True
-                    if own_goal:
-                        # Penalize by subtracting penalty from the scalar reward
-                        reward -= float(self.own_goal_penalty)
-            # Clear last_toucher after goal regardless
-            self.last_toucher = None
-            self.last_toucher_step = None
-            # Reset inactivity counter after goal/serve
-            self._steps_since_touch = 0
-            # Pause for 1 second in visible mode
-            if self.render_mode == "human":
-                self.state = np.array([
-                    paddle1_x, paddle1_y, paddle2_x, paddle2_y,
-                    puck_x, puck_y, puck_vx, puck_vy
-                ], dtype=np.float32)
-                self.render()
-                time.sleep(1)
+                    if recent:
+                        # If reward positive (red scored) but last_toucher was blue -> blue own-goal
+                        if reward > 0 and self.last_toucher == 1:
+                            own_goal = True
+                        # If reward negative (blue scored) but last_toucher was red -> red own-goal
+                        if reward < 0 and self.last_toucher == 0:
+                            own_goal = True
+                        if own_goal:
+                            # Penalize by subtracting penalty from the scalar reward
+                            reward -= float(self.own_goal_penalty)
+                            if self.debug:
+                                print(f"[DEBUG_GOAL] own_goal detected: last_toucher={self.last_toucher} penalty={self.own_goal_penalty} new_reward={reward}")
+                # Clear last_toucher after goal regardless
+                    if self.debug:
+                        print(f"[DEBUG_GOAL] clearing last_toucher (was={self.last_toucher}) and resetting steps_since_touch")
+                self.last_toucher = None
+                self.last_toucher_step = None
+                # Reset inactivity counter after goal/serve
+                self._steps_since_touch = 0
+                # Pause for 1 second in visible mode
+                if self.render_mode == "human":
+                    self.state = np.array([
+                        paddle1_x, paddle1_y, paddle2_x, paddle2_y,
+                        puck_x, puck_y, puck_vx, puck_vy
+                    ], dtype=np.float32)
+                    self.render()
+                    time.sleep(1)
+        else:
+            # Goals disabled: no scoring or reset behavior
+            reward = 0.0
+            goal_scored = False
+            match_over = False
 
         # Check for match end (first to 7 goals)
         if self.score[0] >= 7 or self.score[1] >= 7:
@@ -360,9 +416,18 @@ class AirHockeyEnv(gym.Env):
         self.viewer.fill((30, 30, 30), rect=(self.BOARD_WIDTH, 0, self.STATS_WIDTH, self.HEIGHT))
         # Draw center line
         pygame.draw.line(self.viewer, (255, 255, 255), (0, self.HEIGHT//2), (self.BOARD_WIDTH, self.HEIGHT//2), 2)
-        # Draw goals (top and bottom)
-        pygame.draw.rect(self.viewer, (0, 0, 200), (self.BOARD_WIDTH//2 - self.GOAL_WIDTH//2, 0, self.GOAL_WIDTH, self.GOAL_HEIGHT))
-        pygame.draw.rect(self.viewer, (200, 0, 0), (self.BOARD_WIDTH//2 - self.GOAL_WIDTH//2, self.HEIGHT - self.GOAL_HEIGHT, self.GOAL_WIDTH, self.GOAL_HEIGHT))
+        # Draw goals (top and bottom). Color the agent's goal Red and opponent's goal Blue
+        agent_phys_idx = 1 if getattr(self, '_swapped', False) else 0
+        # If agent is physically paddle0 (bottom), bottom goal is agent's goal (red)
+        if agent_phys_idx == 0:
+            top_goal_color = (0, 0, 200)
+            bottom_goal_color = (200, 0, 0)
+        else:
+            # Agent is physically paddle1 (top); top goal becomes agent's goal (red)
+            top_goal_color = (200, 0, 0)
+            bottom_goal_color = (0, 0, 200)
+        pygame.draw.rect(self.viewer, top_goal_color, (self.BOARD_WIDTH//2 - self.GOAL_WIDTH//2, 0, self.GOAL_WIDTH, self.GOAL_HEIGHT))
+        pygame.draw.rect(self.viewer, bottom_goal_color, (self.BOARD_WIDTH//2 - self.GOAL_WIDTH//2, self.HEIGHT - self.GOAL_HEIGHT, self.GOAL_WIDTH, self.GOAL_HEIGHT))
         # Draw paddles
         paddle1_x, paddle1_y, paddle2_x, paddle2_y, puck_x, puck_y, _, _ = self.state
         # Determine which physical paddle the agent controls this episode.
@@ -376,7 +441,7 @@ class AirHockeyEnv(gym.Env):
             pygame.draw.circle(self.viewer, agent_color_rgb, (int(paddle1_x), int(paddle1_y)), self.PADDLE_RADIUS)
             pygame.draw.circle(self.viewer, opp_color_rgb, (int(paddle2_x), int(paddle2_y)), self.PADDLE_RADIUS)
         else:
-            # Agent is physically paddle2 (top) this episode; draw it red.
+            # Agent is physically paddle2 (top) this episode; draw it red and opponent blue.
             pygame.draw.circle(self.viewer, opp_color_rgb, (int(paddle1_x), int(paddle1_y)), self.PADDLE_RADIUS)
             pygame.draw.circle(self.viewer, agent_color_rgb, (int(paddle2_x), int(paddle2_y)), self.PADDLE_RADIUS)
         # Draw puck
@@ -384,9 +449,8 @@ class AirHockeyEnv(gym.Env):
         # Draw stats in the right area (simplified)
         font = pygame.font.SysFont(None, 32)
         stats_x = self.BOARD_WIDTH + 20
-        # If sides are swapped this episode, the training agent is physically player2
-        # so swap the displayed scores so Red (Agent) always shows the agent's score.
-        if getattr(self, '_swapped', False):
+        # If sides are swapped this episode, swap score display so Red (Agent) shows agent's score.
+        if agent_phys_idx == 1:
             displayed_red_score = self.score[1]
             displayed_blue_score = self.score[0]
         else:
@@ -395,8 +459,11 @@ class AirHockeyEnv(gym.Env):
 
         # Red is always the training agent in the UI
         red_text = font.render(f"Red (Agent): {displayed_red_score}", True, (255, 0, 0))
-        # Blue shows opponent mode in parentheses
-        blue_mode = "random" if self.blue_random else "self-play"
+        # Blue shows opponent mode in parentheses unless Blue is the agent this episode
+        if agent_phys_idx == 0:
+            blue_mode = "random" if self.blue_random else "self-play"
+        else:
+            blue_mode = "agent"
         blue_text = font.render(f"Blue ({blue_mode}): {displayed_blue_score}", True, (0, 0, 255))
         self.viewer.blit(red_text, (stats_x, 40))
         self.viewer.blit(blue_text, (stats_x, 80))
@@ -412,12 +479,14 @@ class AirHockeyEnv(gym.Env):
                 inact_pen = cfg.get('inactivity_penalty')
                 blue_rand = 'on' if cfg.get('blue_random') else 'off'
                 sides = 'random' if cfg.get('randomize_sides') else 'fixed'
+                center = 'on' if getattr(self, 'center_serve', False) else 'off'
                 self.viewer.blit(cfg_font.render(f"Wrapper: {wrapper}", True, (200,200,200)), (stats_x, 120))
                 self.viewer.blit(cfg_font.render(f"Touch shaping: {shaping}", True, (200,200,200)), (stats_x, 144))
                 self.viewer.blit(cfg_font.render(f"Inactivity: steps={inact_steps}", True, (200,200,200)), (stats_x, 168))
                 self.viewer.blit(cfg_font.render(f"Inactivity penalty: {inact_pen}", True, (200,200,200)), (stats_x, 192))
                 self.viewer.blit(cfg_font.render(f"Blue random: {blue_rand}", True, (200,200,200)), (stats_x, 216))
                 self.viewer.blit(cfg_font.render(f"Sides: {sides}", True, (200,200,200)), (stats_x, 240))
+                self.viewer.blit(cfg_font.render(f"Center serve: {center}", True, (200,200,200)), (stats_x, 264))
         except Exception:
             pass
         # Show which reward mechanisms are effective (clear, non-numeric list)

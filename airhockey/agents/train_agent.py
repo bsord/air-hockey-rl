@@ -74,6 +74,7 @@ parser.add_argument('--max-episode-steps', type=int, default=None,
 parser.add_argument('--debug-env', action='store_true', help='Enable environment debug prints')
 parser.add_argument('--no-randomize-sides', dest='randomize_sides', action='store_false', help='Disable randomizing which paddle the policy controls each episode')
 parser.set_defaults(randomize_sides=True)
+parser.add_argument('--disable-goals', action='store_true', help='Run environment without goals/resets (diagnostic)')
 args = parser.parse_args()
 
 VISIBLE = args.visible
@@ -91,6 +92,7 @@ env_kwargs = dict(render_mode=render_mode, blue_random=BLUE_RANDOM,
                   inactivity_penalty=args.inactivity_penalty,
                   max_episode_steps=args.max_episode_steps,
                   debug=args.debug_env,
+                  disable_goals=args.disable_goals,
                   randomize_sides=args.randomize_sides)
 base_env = gym.make("AirHockey-v0", **{k: v for k, v in env_kwargs.items() if v is not None})
 
