@@ -32,7 +32,7 @@ from gymnasium import spaces
 class MiniAirHockeyEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 60}
 
-    def __init__(self, width=640, height=480, max_steps=600, render_mode=None, center_serve_prob=0.0, paddle_speed=220.0):
+    def __init__(self, width=640, height=480, max_steps=600, render_mode=None, center_serve_prob=0.0, paddle_speed=220.0, touch_reward=30.0, nudge_reward=0.01):
         super().__init__()
         self.W = width
         self.H = height
@@ -44,6 +44,9 @@ class MiniAirHockeyEnv(gym.Env):
         self.paddle_x = width / 2.0
         self.paddle_y = height - 40.0
         self.paddle_speed = float(paddle_speed)
+        # Paddle velocity for acceleration logic
+        self.paddle_vx = 0.0
+        self.paddle_vy = 0.0
         # Ball parameters
         self.ball_radius = 10.0
         self.ball_x = width / 2.0
@@ -55,6 +58,8 @@ class MiniAirHockeyEnv(gym.Env):
         self.dt = 1.0 / 60.0
         # Probability that reset places the puck static in the center (serve)
         self.center_serve_prob = float(center_serve_prob)
+        self.touch_reward = float(touch_reward)
+        self.nudge_reward = float(nudge_reward)
 
         # Observation: [paddle_x, paddle_y, ball_x, ball_y, ball_vx, ball_vy]
         high = np.array([self.W, self.H, self.W, self.H, 1e3, 1e3], dtype=np.float32)
@@ -84,9 +89,11 @@ class MiniAirHockeyEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        # Curriculum: start paddle closer to the ball
+        # Start paddle far from the ball for increased challenge
         self.paddle_x = self.W / 2.0
-        self.paddle_y = self.H / 2.0 + 60.0  # 60 pixels below the ball
+        self.paddle_y = self.H - 40.0  # near the bottom, farthest from ball
+        self.paddle_vx = 0.0
+        self.paddle_vy = 0.0
         self.ball_x = self.W / 2.0
         self.ball_y = self.H / 2.0
     # With some probability keep the puck static in the center to simulate a serve.
@@ -121,6 +128,7 @@ class MiniAirHockeyEnv(gym.Env):
         # action is desired velocity vector in [-1,1] for each axis
         ax = float(np.clip(action[0], -1.0, 1.0))
         ay = float(np.clip(action[1], -1.0, 1.0))
+        # Paddle acceleration logic
         # Compute intended velocity vector
         intended_vx = ax * self.paddle_speed
         intended_vy = ay * self.paddle_speed
@@ -130,9 +138,21 @@ class MiniAirHockeyEnv(gym.Env):
             scale = self.paddle_speed / mag
             intended_vx *= scale
             intended_vy *= scale
+        # Limit acceleration per frame
+        MAX_ACCEL = self.paddle_speed * 0.15  # adjust for realism (e.g., 15% of max speed per frame)
+        accel_x = np.clip(intended_vx - self.paddle_vx, -MAX_ACCEL, MAX_ACCEL)
+        accel_y = np.clip(intended_vy - self.paddle_vy, -MAX_ACCEL, MAX_ACCEL)
+        self.paddle_vx += accel_x
+        self.paddle_vy += accel_y
+        # Cap velocity to max speed
+        vel_mag = math.hypot(self.paddle_vx, self.paddle_vy)
+        if vel_mag > self.paddle_speed:
+            scale = self.paddle_speed / vel_mag
+            self.paddle_vx *= scale
+            self.paddle_vy *= scale
         # Move paddle by velocity * dt
-        self.paddle_x += intended_vx * self.dt
-        self.paddle_y += intended_vy * self.dt
+        self.paddle_x += self.paddle_vx * self.dt
+        self.paddle_y += self.paddle_vy * self.dt
         # clamp paddle
         self.paddle_x = float(np.clip(self.paddle_x, self.paddle_radius, self.W - self.paddle_radius))
         self.paddle_y = float(np.clip(self.paddle_y, self.H / 2.0, self.H - self.paddle_radius))
@@ -140,9 +160,9 @@ class MiniAirHockeyEnv(gym.Env):
         dx = self.ball_x - self.paddle_x
         dy = self.ball_y - self.paddle_y
         to_puck = np.array([dx, dy])
-        move_vec = np.array([intended_vx, intended_vy])
+        move_vec = np.array([self.paddle_vx, self.paddle_vy])
         if np.dot(to_puck, move_vec) > 0:
-            reward = 0.01  # much smaller nudge for moving toward the puck
+            reward = self.nudge_reward  # nudge for moving toward the puck
         else:
             reward = 0.0
 
@@ -172,8 +192,8 @@ class MiniAirHockeyEnv(gym.Env):
             # compute paddle velocity (px/s) from the action so we can
             # reward harder impacts. Use the normal from paddle->ball
             # to measure closing/pushing speed.
-            paddle_vx = intended_vx
-            paddle_vy = intended_vy
+            paddle_vx = self.paddle_vx
+            paddle_vy = self.paddle_vy
             # store pre-collision ball velocity
             old_bvx = float(self.ball_vx)
             old_bvy = float(self.ball_vy)
@@ -214,9 +234,7 @@ class MiniAirHockeyEnv(gym.Env):
         # small shaping bonus for touching the puck to encourage contact
         if touched:
             # make touching much more valuable than raw proximity
-            TOUCH_BONUS = 30.0
-            # reward a lot for any touch
-            reward += TOUCH_BONUS
+            reward += self.touch_reward
             # reward additional bonus proportional to how hard the paddle
             # hit the puck. Scale and clamp to avoid overpowering the base reward.
             impact_speed = rel_norm_pos
@@ -317,7 +335,7 @@ class MiniAirHockeyEnv(gym.Env):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--timesteps', type=int, default=2000)
+    parser.add_argument('--timesteps', type=int, default=6000)
     parser.add_argument('--visible', action='store_true')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--save-path', type=str, default='min_sac_standalone')
@@ -329,11 +347,15 @@ def main():
                         help='Probability [0..1] that reset places the puck static at center (serve)')
     parser.add_argument('--paddle-speed', type=float, default=300.0,
                         help='Maximum paddle speed in px/s (agent can move at any speed up to this value, e.g. 350)')
+    parser.add_argument('--touch-reward', type=float, default=30.0, help='Reward for touching the puck')
+    parser.add_argument('--nudge-reward', type=float, default=0.01, help='Reward for moving toward the puck')
     args = parser.parse_args()
 
     env = MiniAirHockeyEnv(render_mode='human' if args.visible else None,
                            center_serve_prob=args.center_serve_prob,
-                           paddle_speed=args.paddle_speed)
+                           paddle_speed=args.paddle_speed,
+                           touch_reward=args.touch_reward,
+                           nudge_reward=args.nudge_reward)
     env = gym.wrappers.TimeLimit(env, max_episode_steps=int(args.max_steps))
 
     # Try to import stable-baselines3 lazily
