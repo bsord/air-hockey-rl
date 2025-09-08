@@ -84,8 +84,9 @@ class MiniAirHockeyEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        # Curriculum: start paddle closer to the ball
         self.paddle_x = self.W / 2.0
-        self.paddle_y = self.H - 40.0
+        self.paddle_y = self.H / 2.0 + 60.0  # 60 pixels below the ball
         self.ball_x = self.W / 2.0
         self.ball_y = self.H / 2.0
     # With some probability keep the puck static in the center to simulate a serve.
@@ -141,7 +142,7 @@ class MiniAirHockeyEnv(gym.Env):
         to_puck = np.array([dx, dy])
         move_vec = np.array([intended_vx, intended_vy])
         if np.dot(to_puck, move_vec) > 0:
-            reward = 0.1  # nudge for moving toward the puck
+            reward = 0.01  # much smaller nudge for moving toward the puck
         else:
             reward = 0.0
 
@@ -212,18 +213,15 @@ class MiniAirHockeyEnv(gym.Env):
         self._prev_approach_dist = None
         # small shaping bonus for touching the puck to encourage contact
         if touched:
-            # make touching more valuable than raw proximity
-            TOUCH_BONUS = 10.0
-            # reward a bit for any touch
+            # make touching much more valuable than raw proximity
+            TOUCH_BONUS = 30.0
+            # reward a lot for any touch
             reward += TOUCH_BONUS
             # reward additional bonus proportional to how hard the paddle
             # hit the puck. Scale and clamp to avoid overpowering the base reward.
-            # compute hit bonus from the relative normal speed BEFORE we
-            # updated the ball velocity (use rel_norm_pos computed above).
             impact_speed = rel_norm_pos
-            # stronger scaling so harder hits matter more
-            HIT_REWARD_SCALE = 0.005
-            MAX_HIT_BONUS = 2.0
+            HIT_REWARD_SCALE = 0.01
+            MAX_HIT_BONUS = 5.0
             impact_bonus = min(impact_speed * HIT_REWARD_SCALE, MAX_HIT_BONUS)
             reward += float(impact_bonus)
 
@@ -323,13 +321,13 @@ def main():
     parser.add_argument('--visible', action='store_true')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--save-path', type=str, default='min_sac_standalone')
-    parser.add_argument('--max-steps', type=int, default=120,
-                        help='Maximum steps per episode (TimeLimit). Default 120 for faster episodes')
+    parser.add_argument('--max-steps', type=int, default=600,
+                        help='Maximum steps per episode (TimeLimit). Default 600 to match Optuna tuning')
     parser.add_argument('--device', type=str, default='auto',
                         help="Device to use: 'auto'|'cpu'|'cuda' (auto selects cuda if available)")
     parser.add_argument('--center-serve-prob', type=float, default=0.60,
                         help='Probability [0..1] that reset places the puck static at center (serve)')
-    parser.add_argument('--paddle-speed', type=float, default=220.0,
+    parser.add_argument('--paddle-speed', type=float, default=300.0,
                         help='Maximum paddle speed in px/s (agent can move at any speed up to this value, e.g. 350)')
     args = parser.parse_args()
 
@@ -395,7 +393,19 @@ def main():
     else:
         # increase entropy coefficient slightly to encourage exploration
         # (helps in sparse-reward settings where the agent must try moves)
-        model = SAC('MlpPolicy', env, verbose=1, seed=args.seed, device=device, ent_coef=0.5)
+        # Use best hyperparameters from trial 9
+        # Use best hyperparameters from trial 7
+        model = SAC(
+            'MlpPolicy',
+            env,
+            learning_rate=0.000042,
+            ent_coef=0.443913,
+            batch_size=256,
+            buffer_size=50000,
+            verbose=1,
+            seed=args.seed,
+            device=device
+        )
 
     print(f"Training SAC for {args.timesteps} timesteps (visible={args.visible})")
     callback = RenderCallback(render_freq=5) if args.visible else None

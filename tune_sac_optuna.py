@@ -45,7 +45,7 @@ def objective(trial):
     batch_size = trial.suggest_categorical('batch_size', [64, 128, 256])
     buffer_size = trial.suggest_categorical('buffer_size', [10000, 20000, 50000, 100000])
 
-    env = MiniAirHockeyEnv(paddle_speed=300)
+    env = MiniAirHockeyEnv(paddle_speed=300, center_serve_prob=0.60)
     # Suppress SB3 logging to minimize wrapper messages
     import logging
     logging.getLogger('stable_baselines3').setLevel(logging.ERROR)
