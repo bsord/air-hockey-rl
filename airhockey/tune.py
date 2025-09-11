@@ -3,7 +3,7 @@ import gymnasium as gym
 import numpy as np
 from stable_baselines3 import SAC
 from stable_baselines3.common.evaluation import evaluate_policy
-from min_sac_standalone import MiniAirHockeyEnv
+from airhockey.env import MiniAirHockeyEnv
 
 # Evaluation function: runs several episodes and returns mean reward
 def evaluate_agent(model, env, n_eval_episodes=30, trial_number=None, params=None):
@@ -46,7 +46,6 @@ def objective(trial):
     buffer_size = trial.suggest_categorical('buffer_size', [10000, 20000, 50000, 100000])
 
     env = MiniAirHockeyEnv(paddle_speed=300, center_serve_prob=0.60)
-    # Suppress SB3 logging to minimize wrapper messages
     import logging
     logging.getLogger('stable_baselines3').setLevel(logging.ERROR)
     model = SAC('MlpPolicy', env,
@@ -78,8 +77,7 @@ if __name__ == '__main__':
     print('Best hyperparameters:', study.best_params)
     print('Best mean reward:', study.best_value)
 
-    # Final save (in case last callback is missed)
     study.trials_dataframe().to_csv(f'{study.study_name}_results.csv', index=False)
 
     # To run: pip install optuna stable-baselines3 gymnasium
-    # Then: python tune_sac_optuna.py
+    # Then: python airhockey/tune.py

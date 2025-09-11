@@ -7,7 +7,7 @@ Learn to reliably approach and make contact with the ball
 	- center_serve_prob: 0.3
 - Example command:
 	```powershell
-	python min_sac_standalone.py `
+	python -m airhockey.train `
 		--timesteps 100000 `
 		--center-serve-prob 0.3 `
 		--touch-reward 50.0 `
@@ -25,7 +25,7 @@ Develop fine control and ball handling
 	- center_serve_prob: 0.15
 - Example command:
 	```powershell
-	python min_sac_standalone.py `
+	python -m airhockey.train `
 	  --timesteps 100000 `
 	  --center-serve-prob 0.15 `
 	  --touch-reward 25.0 `
@@ -44,7 +44,7 @@ Agent must compete for ball control and scoring against a simple scripted oppone
 - Goal: Learn basic competitive behaviors (offense and defense)
 - Example command:
 	```powershell
-	python min_sac_standalone.py `
+	python -m airhockey.train `
 	  --timesteps 100000 `
 	  --center-serve-prob 0.15 `
 	  --touch-reward 1.0 `
@@ -62,7 +62,7 @@ Agent must compete for ball control and scoring against a simple scripted oppone
 - Goal: Achieve robust play in realistic air hockey matches
 - Example command:
 	```powershell
-	python min_sac_standalone.py `
+	python -m airhockey.train `
 	  --timesteps 100000 `
 	  --center-serve-prob 0.15 `
 	  --touch-reward 0.5 `
