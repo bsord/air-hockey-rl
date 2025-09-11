@@ -1,34 +1,36 @@
 ## Phase 1: Basic Touch
 Learn to reliably approach and make contact with the ball
 - Rewards:
-	- Touch reward: 30.0
-	- Gentle nudge for moving toward puck: 0.01–0.05 per step
+	- Touch reward: 50.0
+	- Gentle nudge for moving toward puck: 0.05 per step
 - Environment config:
 	- center_serve_prob: 0.3
 - Example command:
-    ```powershell
-    python min_sac_standalone.py `
-        --timesteps 100000 `
-        --center-serve-prob 0.3 `
-        --touch-reward 30.0 `
-        --nudge-reward 0.01 `
-        --visible
-    ```
+	```powershell
+	python min_sac_standalone.py `
+		--timesteps 100000 `
+		--center-serve-prob 0.3 `
+		--touch-reward 50.0 `
+		--nudge-reward 0.05 `
+		--touch-reset `
+		--visible
+	```
 ## Phase 2: Multi-Touch and Control
 Develop fine control and ball handling
 - Rewards:
-    - Touch reward: 1.0 per touch
-    - No nudge
-    - Bonus for consecutive touches: 0.5 (optional)
+	- Touch reward: 25.0 per touch
+	- No nudge
+	- Consecutive touch reward: 25.0
 - Environment config:
-    - center_serve_prob: 0.15
+	- center_serve_prob: 0.15
 - Example command:
 	```powershell
 	python min_sac_standalone.py `
 	  --timesteps 100000 `
 	  --center-serve-prob 0.15 `
-	  --touch-reward 1.0 `
-	  --nudge-reward 0.0 `
+	  --touch-reward 25.0 `
+	  --nudge-reward 0.01 `
+	  --consecutive-touch-reward 10.0 `
 	  --visible
 	```
 ## Phase 3: Basic Competition (Opponent Simulation)
