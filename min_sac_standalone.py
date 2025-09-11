@@ -32,7 +32,7 @@ from gymnasium import spaces
 class MiniAirHockeyEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 60}
 
-    def __init__(self, width=800, height=400, max_steps=1200, render_mode=None, center_serve_prob=0.0, paddle_speed=220.0, touch_reward=30.0, nudge_reward=0.01, consecutive_touch_reward=0.0, touch_reset=False):
+    def __init__(self, width=800, height=400, max_steps=600, render_mode=None, center_serve_prob=0.0, paddle_speed=220.0, touch_reward=30.0, nudge_reward=0.01, consecutive_touch_reward=0.0, touch_reset=False, puck_drag=0.997):
         super().__init__()
         self.W = width
         self.H = height
@@ -41,7 +41,8 @@ class MiniAirHockeyEnv(gym.Env):
 
         # Paddle (agent) parameters
         self.paddle_radius = 20.0
-        self.paddle_x = 40.0  # Start near the left edge
+        margin = 32
+        self.paddle_x = margin + self.paddle_radius  # Start near the left edge inside table
         self.paddle_y = height / 2.0  # Center vertically
         self.paddle_speed = float(paddle_speed)
         # Paddle velocity for acceleration logic
@@ -53,6 +54,8 @@ class MiniAirHockeyEnv(gym.Env):
         self.ball_y = height / 2.0
         self.ball_vx = 120.0  # px / s
         self.ball_vy = 80.0
+        # Puck drag coefficient (per frame)
+        self.puck_drag = float(puck_drag)
 
         # Timing for physics
         self.dt = 1.0 / 60.0
@@ -96,7 +99,8 @@ class MiniAirHockeyEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         # Start paddle far from the ball for increased challenge
-        self.paddle_x = 40.0  # Start near the left edge
+        margin = 32
+        self.paddle_x = margin + self.paddle_radius  # Start near the left edge inside table
         self.paddle_y = self.H / 2.0  # Center vertically
         self.paddle_vx = 0.0
         self.paddle_vy = 0.0
@@ -163,9 +167,26 @@ class MiniAirHockeyEnv(gym.Env):
         self.paddle_x += self.paddle_vx * self.dt
         self.paddle_y += self.paddle_vy * self.dt
         # clamp paddle
-        # Limit agent to left half of table
-        self.paddle_x = float(np.clip(self.paddle_x, self.paddle_radius, self.W / 2.0 - self.paddle_radius))
-        self.paddle_y = float(np.clip(self.paddle_y, self.paddle_radius, self.H - self.paddle_radius))
+        margin = 32
+        # Limit agent to left half of table overlay
+        self.paddle_x = float(np.clip(self.paddle_x, margin + self.paddle_radius, self.W / 2.0 - self.paddle_radius))
+        self.paddle_y = float(np.clip(self.paddle_y, margin + self.paddle_radius, self.H - margin - self.paddle_radius))
+        # Bounce off table overlay walls
+        if self.ball_x - self.ball_radius < margin:
+            self.ball_x = margin + self.ball_radius
+            self.ball_vx = -self.ball_vx
+        if self.ball_x + self.ball_radius > self.W - margin:
+            self.ball_x = self.W - margin - self.ball_radius
+            self.ball_vx = -self.ball_vx
+        if self.ball_y - self.ball_radius < margin:
+            self.ball_y = margin + self.ball_radius
+            self.ball_vy = -self.ball_vy
+        if self.ball_y + self.ball_radius > self.H - margin:
+            self.ball_y = self.H - margin - self.ball_radius
+            self.ball_vy = -self.ball_vy
+        # Clamp ball to table overlay for numerical safety
+        self.ball_x = float(np.clip(self.ball_x, margin + self.ball_radius, self.W - margin - self.ball_radius))
+        self.ball_y = float(np.clip(self.ball_y, margin + self.ball_radius, self.H - margin - self.ball_radius))
         # Nudge reward: small bonus for moving toward the puck (not for getting closer)
         dx = self.ball_x - self.paddle_x
         dy = self.ball_y - self.paddle_y
@@ -176,23 +197,35 @@ class MiniAirHockeyEnv(gym.Env):
         else:
             reward = 0.0
 
+        # Apply puck drag before updating position
+        self.ball_vx *= self.puck_drag
+        self.ball_vy *= self.puck_drag
         # ball physics
         self.ball_x += self.ball_vx * self.dt
         self.ball_y += self.ball_vy * self.dt
-
-        # bounce off walls
-        if self.ball_x - self.ball_radius < 0:
-            self.ball_x = self.ball_radius
+        # Bounce off table overlay walls (margin)
+        margin = 32
+        if self.ball_x - self.ball_radius < margin:
+            self.ball_x = margin + self.ball_radius
             self.ball_vx = -self.ball_vx
-        if self.ball_x + self.ball_radius > self.W:
-            self.ball_x = self.W - self.ball_radius
+        if self.ball_x + self.ball_radius > self.W - margin:
+            self.ball_x = self.W - margin - self.ball_radius
             self.ball_vx = -self.ball_vx
-        if self.ball_y - self.ball_radius < 0:
-            self.ball_y = self.ball_radius
+        if self.ball_y - self.ball_radius < margin:
+            self.ball_y = margin + self.ball_radius
             self.ball_vy = -self.ball_vy
-        if self.ball_y + self.ball_radius > self.H:
-            self.ball_y = self.H - self.ball_radius
+        if self.ball_y + self.ball_radius > self.H - margin:
+            self.ball_y = self.H - margin - self.ball_radius
             self.ball_vy = -self.ball_vy
+        # Clamp ball to table overlay for numerical safety (after bounce)
+        self.ball_x = float(np.clip(self.ball_x, margin + self.ball_radius, self.W - margin - self.ball_radius))
+        self.ball_y = float(np.clip(self.ball_y, margin + self.ball_radius, self.H - margin - self.ball_radius))
+        # Safety: if puck somehow leaves table, reset to center
+        if not (margin + self.ball_radius <= self.ball_x <= self.W - margin - self.ball_radius) or not (margin + self.ball_radius <= self.ball_y <= self.H - margin - self.ball_radius):
+            self.ball_x = self.W / 2.0
+            self.ball_y = self.H / 2.0
+            self.ball_vx = 0.0
+            self.ball_vy = 0.0
 
         # simple paddle collision: bounce if overlapping
         dist = math.hypot(dx, dy)
@@ -351,12 +384,12 @@ class MiniAirHockeyEnv(gym.Env):
         pygame.draw.circle(surface, puck_color, (int(self.ball_x), int(self.ball_y)), int(self.ball_radius))
         # Draw paddle
         pygame.draw.circle(surface, paddle_color, (int(self.paddle_x), int(self.paddle_y)), int(self.paddle_radius))
-        # HUD: show last-step reward and episode totals
-        txt = self.font.render(f"Last reward: {getattr(self, '_last_reward', 0.0):.3f}", True, (20,20,20))
-        surface.blit(txt, (8, 8))
-        # episode stats
-        ep_txt = self.font.render(f"EP len={getattr(self, '_ep_length', 0)} r={getattr(self, '_ep_reward', 0.0):.2f} touches={getattr(self, '_ep_touches', 0)} consecutive: {getattr(self, '_ep_consecutive_touches', 0)}", True, (20,20,20))
-        surface.blit(ep_txt, (8, 32))
+        # HUD: center episode stats in white, remove last reward
+        ep_txt = self.font.render(
+            f"EP len={getattr(self, '_ep_length', 0)} r={getattr(self, '_ep_reward', 0.0):.2f} touches={getattr(self, '_ep_touches', 0)} consecutive: {getattr(self, '_ep_consecutive_touches', 0)}",
+            True, (255,255,255))
+        ep_rect = ep_txt.get_rect(center=(self.W // 2, 16))  # Move closer to top
+        surface.blit(ep_txt, ep_rect)
         pygame.display.flip()
         self.clock.tick(60)
 
@@ -377,7 +410,7 @@ def main():
     parser.add_argument('--visible', action='store_true')
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--save-path', type=str, default='min_sac_standalone')
-    parser.add_argument('--max-steps', type=int, default=1200,
+    parser.add_argument('--max-steps', type=int, default=600,
                         help='Maximum steps per episode (TimeLimit). Default 600 to match Optuna tuning')
     parser.add_argument('--device', type=str, default='auto',
                         help="Device to use: 'auto'|'cpu'|'cuda' (auto selects cuda if available)")
@@ -389,6 +422,7 @@ def main():
     parser.add_argument('--nudge-reward', type=float, default=0.01, help='Reward for moving toward the puck')
     parser.add_argument('--consecutive-touch-reward', type=float, default=0.0, help='Reward for consecutive touches (Phase 2 support)')
     parser.add_argument('--touch-reset', action='store_true', help='End episode after first touch')
+    parser.add_argument('--puck-drag', type=float, default=0.997, help='Puck drag coefficient per frame (default 0.997, closer to 1 is less drag)')
     args = parser.parse_args()
 
     env = MiniAirHockeyEnv(render_mode='human' if args.visible else None,
@@ -397,7 +431,8 @@ def main():
                            touch_reward=args.touch_reward,
                            nudge_reward=args.nudge_reward,
                            consecutive_touch_reward=args.consecutive_touch_reward,
-                           touch_reset=args.touch_reset)
+                           touch_reset=args.touch_reset,
+                           puck_drag=args.puck_drag)
     env = gym.wrappers.TimeLimit(env, max_episode_steps=int(args.max_steps))
 
     # Try to import stable-baselines3 lazily
