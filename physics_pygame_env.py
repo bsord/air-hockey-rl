@@ -5,14 +5,19 @@ import math
 import sys
 
 class PhysicsAirHockeyEnv:
-    def __init__(self, width=800, height=400):
+    def __init__(self, width=800, height=400, maximize_window=False):
         pygame.init()
         
         # Screen setup
         self.width = width
         self.height = height
-        self.screen = pygame.display.set_mode((width, height))
+        self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
         pygame.display.set_caption("Physics Air Hockey Environment")
+        
+        # Maximize if requested
+        if maximize_window:
+            from pygame._sdl2 import Window
+            Window.from_display_module().maximize()
         
         # Colors
         self.WHITE = (255, 255, 255)
@@ -112,9 +117,9 @@ class PhysicsAirHockeyEnv:
     
     def create_ball(self):
         """Create the ball with physics properties"""
-        # Ball properties
+        # Ball properties - realistic air hockey puck size
         mass = 1
-        radius = 8
+        radius = 12  # Increased from 8 to match real air hockey proportions
         
         # Create ball body and shape
         inertia = pymunk.moment_for_circle(mass, 0, radius, (0, 0))
@@ -132,18 +137,18 @@ class PhysicsAirHockeyEnv:
         self.space.add(self.ball_body, self.ball_shape)
     
     def reset_ball(self):
-        """Reset ball position along bottom wall to roll around the corner"""
-        # Position ball along the bottom wall, a bit away from the center
-        bottom_wall_y = self.table_y + self.table_height - 15  # Just above the bottom wall
-        start_x = self.table_x + self.corner_radius + 100  # Start partway along the bottom
+        """Reset ball position to move toward bottom-right corner"""
+        # Position ball in the middle-left area of the table
+        start_x = self.table_x + self.corner_radius + 50  # Left side of table
+        start_y = self.table_y + self.table_height // 2   # Middle height
         
-        self.ball_body.position = start_x, bottom_wall_y
+        self.ball_body.position = start_x, start_y
         
-        # Set velocity to move toward the right corner at a shallow angle
-        speed = 400  # Increased speed for better visibility
+        # Set velocity to move toward the bottom-right corner
+        speed = 300  # Moderate speed for good observation
         
-        # Angle toward the right curved corner - shallow angle to roll around
-        angle = math.radians(-15)  # Slightly upward angle toward the right corner
+        # Angle toward the bottom-right corner (shallow downward angle)
+        angle = math.radians(15)  # 15 degrees downward toward bottom-right
         
         vx = speed * math.cos(angle)
         vy = speed * math.sin(angle)
@@ -186,8 +191,8 @@ class PhysicsAirHockeyEnv:
     def draw_ball(self):
         """Draw the ball"""
         pos = int(self.ball_body.position.x), int(self.ball_body.position.y)
-        pygame.draw.circle(self.screen, self.RED, pos, 8)
-        pygame.draw.circle(self.screen, self.BLACK, pos, 8, 2)
+        pygame.draw.circle(self.screen, self.RED, pos, 12)  # Increased from 8 to match physics
+        pygame.draw.circle(self.screen, self.BLACK, pos, 12, 2)
     
     def handle_events(self):
         """Handle pygame events"""
@@ -202,6 +207,14 @@ class PhysicsAirHockeyEnv:
                 elif event.key == pygame.K_d:
                     # Toggle debug drawing
                     self.debug_draw = not getattr(self, 'debug_draw', False)
+                elif event.key == pygame.K_m:
+                    # Toggle window maximization
+                    from pygame._sdl2 import Window
+                    window = Window.from_display_module()
+                    if self.screen.get_size() == (self.width, self.height):
+                        window.maximize()
+                    else:
+                        window.restore()
     
     def run(self):
         """Main game loop"""
@@ -213,14 +226,32 @@ class PhysicsAirHockeyEnv:
             # Step physics
             self.space.step(dt)
             
-            # Draw everything
-            self.screen.fill(self.WHITE)
-            self.draw_table()
-            self.draw_ball()
-            
-            # Optional debug drawing (press 'D' to toggle)
-            if getattr(self, 'debug_draw', False):
-                self.space.debug_draw(self.draw_options)
+            # Simple scaling: render at fixed size, then scale to window
+            window_size = self.screen.get_size()
+            if window_size != (self.width, self.height):
+                # Render to temp surface at original size, then scale
+                temp_surface = pygame.Surface((self.width, self.height))
+                temp_surface.fill(self.WHITE)
+                
+                # Draw to temp surface (reuse existing draw methods)
+                old_screen = self.screen
+                self.screen = temp_surface
+                self.draw_table()
+                self.draw_ball()
+                if getattr(self, 'debug_draw', False):
+                    self.space.debug_draw(self.draw_options)
+                self.screen = old_screen
+                
+                # Scale and display
+                scaled = pygame.transform.scale(temp_surface, window_size)
+                self.screen.blit(scaled, (0, 0))
+            else:
+                # Direct rendering at original size
+                self.screen.fill(self.WHITE)
+                self.draw_table()
+                self.draw_ball()
+                if getattr(self, 'debug_draw', False):
+                    self.space.debug_draw(self.draw_options)
             
             pygame.display.flip()
             self.clock.tick(60)
@@ -230,12 +261,13 @@ class PhysicsAirHockeyEnv:
 
 def main():
     """Main function"""
-    env = PhysicsAirHockeyEnv()
+    env = PhysicsAirHockeyEnv(maximize_window=False)
     print("Physics Air Hockey Environment")
     print("Controls:")
     print("- ESC: Quit")
     print("- SPACE: Reset ball")
     print("- D: Toggle debug physics drawing")
+    print("- M: Toggle window maximize/restore")
     env.run()
 
 if __name__ == "__main__":
