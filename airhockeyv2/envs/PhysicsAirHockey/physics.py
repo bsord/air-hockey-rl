@@ -16,11 +16,11 @@ class PhysicsConfig:
     
     # Wall properties
     WALL_FRICTION = 0.07  # Wall friction (affects sliding behavior along walls)
-    WALL_ELASTICITY = 1  # Wall bounce
+    WALL_ELASTICITY = 1.0  # Wall bounce - 1.0 = perfectly elastic (no energy loss)
     
     # Ball properties
     BALL_FRICTION = 0.3  # Ball friction
-    BALL_ELASTICITY = 0.9  # Ball bounce
+    BALL_ELASTICITY = 1.0  # Ball bounce - 1.0 = perfectly elastic (hard collision)
     BALL_MASS = 1
     BALL_RADIUS = 12  # Realistic air hockey puck size
     
@@ -28,7 +28,7 @@ class PhysicsConfig:
     PADDLE_MASS = 2
     PADDLE_RADIUS = 20  # Slightly larger than ball
     PADDLE_FRICTION = 0.4
-    PADDLE_ELASTICITY = 0.7
+    PADDLE_ELASTICITY = 1.0  # Paddle bounce - 1.0 = perfectly elastic (hard collision)
     
     # Goal properties
     GOAL_WIDTH = 80  # Width of goal opening
