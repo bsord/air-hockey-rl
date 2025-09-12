@@ -12,7 +12,6 @@ Learn to reliably approach and make contact with the ball
 		--center-serve-prob 0.3 `
 		--touch-reward 50.0 `
 		--nudge-reward 0.05 `
-		--touch-reset `
 		--visible
 	```
 ## Phase 2: Multi-Touch and Control
