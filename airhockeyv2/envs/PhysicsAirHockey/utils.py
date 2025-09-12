@@ -63,7 +63,7 @@ class EventHandler:
             self.running = False
         elif event.key == pygame.K_SPACE:
             self.env.reset_ball()
-        elif event.key == pygame.K_d:
+        elif event.key == pygame.K_F1:
             # Toggle debug drawing
             debug_state = self.env.renderer.toggle_debug()
             print(f"Debug drawing: {'ON' if debug_state else 'OFF'}")
@@ -127,9 +127,12 @@ def safe_exit():
 
 def print_controls():
     """Print control instructions to console"""
-    print("Physics Air Hockey Environment")
+    print("🏒 Physics Air Hockey Environment v2")
     print("Controls:")
     print("- ESC: Quit")
     print("- SPACE: Reset ball")
-    print("- D: Toggle debug physics drawing")
+    print("- WASD: Move player paddle (green)")
+    print("- F1: Toggle debug physics drawing")
     print("- M: Toggle window maximize/restore")
+    print("- Opponent paddle (orange) is AI controlled")
+    print("- Score goals by getting the puck into the opponent's goal!")
