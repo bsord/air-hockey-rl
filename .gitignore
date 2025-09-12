@@ -40,7 +40,6 @@ docs/_build/
 # Installer/virtualenv
 venv/
 .venv/
-ENV/
 env.bak/
 venv.bak/
 
